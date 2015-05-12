@@ -1238,6 +1238,163 @@ static JSONKeyMapper* globalKeyMapper = nil;
     return text;
 }
 
+#pragma mark - patching
+
+- (void) patch:(NSDictionary *) patch {
+    if (!patch[@"op"])
+    {
+        JMLog(@"No patch operation specified");
+        return;
+    } else if ([patch[@"op"] isEqualToString:@"add"])
+    {
+        id object = [self objectAtJSONPath:patch[@"path"]];
+        JSONModelClassProperty *objectClassProperty = objc_getAssociatedObject(object, &kObjectClassProperties);
+        objc_setAssociatedObject(object, &kObjectClassProperties, nil, OBJC_ASSOCIATION_RETAIN);
+        if ([object isKindOfClass:[NSArray class]]) {
+            if ([patch[@"value"] isKindOfClass:[NSArray class]]) {
+                for (id obj in patch[@"value"]) {
+                    id value = [[NSClassFromString(objectClassProperty.protocol) alloc] initWithDictionary:obj error:nil];
+                    
+                    if ([[[patch[@"path"] componentsSeparatedByString:@"/"] lastObject] isEqualToString:@"-"]) {
+                        [object addObject:value];
+                    } else {
+                        NSInteger index = [[[patch[@"path"] componentsSeparatedByString:@"/"] lastObject] intValue];
+                        [object insertObject:value atIndex:index];
+                    }
+                }
+            } else {
+                id value = [[NSClassFromString(objectClassProperty.protocol) alloc] initWithDictionary:patch[@"value"] error:nil];
+                
+                if ([[[patch[@"path"] componentsSeparatedByString:@"/"] lastObject] isEqualToString:@"-"]) {
+                    [object addObject:value];
+                } else {
+                    NSInteger index = [[[patch[@"path"] componentsSeparatedByString:@"/"] lastObject] intValue];
+                    [object insertObject:value atIndex:index];
+                }
+            }
+        } else {
+            JSONModel *model = [self parentAtJSONPath:patch[@"path"]];
+            if ([patch[@"value"] isKindOfClass:[NSDictionary class]]) {
+                for (NSString *key in patch[@"value"]) {
+                    [model setValue:patch[@"value"][key] forKey:key];
+                }
+            } else {
+                [model setValue:patch[@"value"] forKey:objectClassProperty.name];
+            }
+        }
+    } else if ([patch[@"op"] isEqualToString:@"remove"]) {
+        if ([[[patch[@"path"] pathComponents] lastObject] rangeOfCharacterFromSet:[[NSCharacterSet decimalDigitCharacterSet] invertedSet]].location == NSNotFound) {
+            id object = [self parentAtJSONPath:patch[@"path"]];
+            NSInteger index = [[[patch[@"path"] pathComponents] lastObject] integerValue];
+            if ([object isKindOfClass:[NSMutableArray class]]) {
+                [object removeObjectAtIndex:index];
+            } else if ([object isKindOfClass:[NSArray class]]) {
+                NSLog(@"");
+            }
+        } else {
+            id object = [self objectAtJSONPath:patch[@"path"]];
+            JSONModelClassProperty *objectClassProperty = objc_getAssociatedObject(object, &kObjectClassProperties);
+            objc_setAssociatedObject(object, &kObjectClassProperties, nil, OBJC_ASSOCIATION_RETAIN);
+            if ([object isKindOfClass:[NSArray class]]) {
+                if ([[[patch[@"path"] componentsSeparatedByString:@"/"] lastObject] isEqualToString:@"-"]) {
+                    [object removeLastObject];
+                }
+            } else {
+                JSONModel *model = [self parentAtJSONPath:patch[@"path"]];
+                [model setValue:nil forKey:objectClassProperty.name];
+            }
+        }
+    }
+}
+
+- (id) objectAtJSONPath:(NSString *)path {
+    NSMutableArray *pathComponents = [NSMutableArray arrayWithArray:[path componentsSeparatedByString:@"/"]];
+    
+    // strip empty paths
+    [pathComponents removeObject:@""];
+    
+    NSString *keyName = [[self class] keyMapper] ? [[[self class] keyMapper] convertValue:[pathComponents firstObject] isImportingToModel:NO] : [pathComponents firstObject];
+    
+    id currentObj = [self valueForKey:keyName];
+    [pathComponents removeObjectAtIndex:0];
+    
+    if ([currentObj isKindOfClass:[NSArray class]] && [pathComponents count] == 0) return currentObj;
+    
+    if ([currentObj isKindOfClass:[JSONModel class]]) {
+        return [currentObj objectAtJSONPath:[pathComponents componentsJoinedByString:@"/"]];
+    } else if ([currentObj isKindOfClass:[NSArray class]]) {
+        if ([[pathComponents firstObject] isKindOfClass:[NSString class]] && [[pathComponents firstObject] isEqualToString:@"-"]) {
+            objc_setAssociatedObject(currentObj, &kObjectClassProperties, [self __propertyForName:keyName], OBJC_ASSOCIATION_RETAIN);
+            return currentObj;
+        }
+        NSInteger index = [[pathComponents firstObject] integerValue];
+        [pathComponents removeObjectAtIndex:0];
+        currentObj = [currentObj objectAtIndex:index];
+        if ([currentObj isKindOfClass:[JSONModel class]] && [pathComponents count]) {
+            return [currentObj objectAtJSONPath:[pathComponents componentsJoinedByString:@"/"]];
+        } else {
+            objc_setAssociatedObject(currentObj, &kObjectClassProperties, [self __propertyForName:keyName], OBJC_ASSOCIATION_RETAIN);
+            return currentObj;
+        }
+    } else {
+        objc_setAssociatedObject(currentObj, &kObjectClassProperties, [self __propertyForName:keyName], OBJC_ASSOCIATION_RETAIN);
+        return currentObj;
+    }
+    
+    return nil;
+}
+
+- (id) parentAtJSONPath:(NSString *)path {
+    // return the parent of the object specified in path; e.g. if the path is `/game/players/0` it will return the `players` array
+    NSMutableArray *pathComponents = [NSMutableArray arrayWithArray:[path pathComponents]];
+    [pathComponents removeLastObject];
+    if ([pathComponents count]) return [self objectAtJSONPath:[pathComponents componentsJoinedByString:@"/"]];
+    return nil;
+}
+
+- (NSString *) pathForModel:(id)model {
+    return [NSString stringWithFormat:@"/%@", [self findPathForModel:model]];
+}
+
+- (NSString *) findPathForModel:(id)model {
+    NSString *currentPath = @"";
+    JSONModel *currentModel = self;
+    for (JSONModelClassProperty *property in [self __properties__]) {
+        id obj = [currentModel valueForKey:property.name];
+        if (obj == model) {
+            currentPath = [currentPath stringByAppendingString:[NSString stringWithFormat:@"%@/", property.name]];
+        } else if ([obj isKindOfClass:[NSArray class]]) {
+            // Find if the given model is included in this array
+            if ([property.protocol isEqualToString:NSStringFromClass([model class])] && [obj containsObject:model]) {
+                currentPath = [currentPath stringByAppendingString:[NSString stringWithFormat:@"%@/%d", property.name, [obj indexOfObject:model]]];
+                break;
+            } else {
+                // Tell to each model in this array to search for the given model
+                for (id subModel in obj) {
+                    if ([subModel isKindOfClass:[JSONModel class]]) {
+                        NSString *path = [subModel findPathForModel:model];
+                        if ([path length]) {
+                            currentPath = [currentPath stringByAppendingString:[NSString stringWithFormat:@"%@/%d/%@", property.name, [obj indexOfObject:subModel], [subModel findPathForModel:model]]];
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if ([currentPath hasSuffix:@"/"] && currentPath.length > 1) currentPath = [currentPath substringToIndex:currentPath.length-1];
+    return currentPath;
+}
+
+- (JSONModelClassProperty *) __propertyForName:(NSString *)name {
+    for (JSONModelClassProperty *property in [self __properties__]) {
+        if ([property.name isEqualToString:name]) return property;
+    }
+    
+    return nil;
+}
+
 #pragma mark - key mapping
 +(JSONKeyMapper*)keyMapper
 {

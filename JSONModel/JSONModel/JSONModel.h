@@ -318,4 +318,16 @@ lastPathComponent], __LINE__, [NSString stringWithFormat:(s), ##__VA_ARGS__] )
  */
 -(void)mergeFromDictionary:(NSDictionary*)dict useKeyMapping:(BOOL)useKeyMapping;
 
+/**
+ * Patches a JSONModel object with values received from a NSDictionary
+ * @param patch dictionary with changed values
+ */
+- (void) patch:(NSDictionary *) patch;
+
+/**
+ * Returns the JSONModel object at a given path
+ * @param path path to the object, separated with /
+ */
+- (id) objectAtJSONPath:(NSString *)path;
+
 @end
